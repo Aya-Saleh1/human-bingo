@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Human Bingo</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<style>
+:root{--bg:#f6f3ee;--surface:#fff;--ink:#1f2430;--muted:#6b7280;--line:#e5e0d6;--accent:#d9480f;--accent-ink:#fff;--mark:#fde7c8;--win:#2f9e44;--bad:#c92a2a;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15171c;--surface:#1f232b;--ink:#eef0f4;--muted:#9aa3b2;--line:#323846;--accent:#ff7a3d;--accent-ink:#1a1206;--mark:#5a3a14;--win:#51cf66;--bad:#ff8787}}
+:root[data-theme="dark"]{--bg:#15171c;--surface:#1f232b;--ink:#eef0f4;--muted:#9aa3b2;--line:#323846;--accent:#ff7a3d;--accent-ink:#1a1206;--mark:#5a3a14;--win:#51cf66;--bad:#ff8787}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:520px;margin:0 auto;padding:16px 14px 40px}
+h1{font-size:26px;margin:4px 0 2px;letter-spacing:-.5px}
+h2{font-size:15px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.sub{color:var(--muted);margin:0 0 14px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:14px}
+ol{margin:0;padding-left:20px}li{margin:4px 0}
+button{font:inherit;font-weight:600;border:0;border-radius:12px;padding:12px 16px;background:var(--accent);color:var(--accent-ink);cursor:pointer;min-height:46px}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:disabled{opacity:.45;cursor:default}
+input{font:inherit;width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin-bottom:10px}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}
+.card{background:var(--surface);border:2px solid var(--line);border-radius:16px;padding:8px;margin-bottom:14px}
+.card.won{border-color:var(--win);box-shadow:0 0 0 3px color-mix(in srgb,var(--win) 30%,transparent)}
+.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
+.cell{aspect-ratio:1;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font-size:10.5px;line-height:1.15;font-weight:500;padding:3px;min-height:0;display:flex;align-items:center;justify-content:center;text-align:center;overflow:hidden;word-break:break-word}
+.cell.marked{background:var(--mark);border-color:var(--accent);font-weight:800;font-size:12px}
+.cell.line{background:var(--win);color:#fff;border-color:var(--win)}
+.banner{background:var(--win);color:#fff;border-radius:12px;padding:10px;text-align:center;font-weight:800;font-size:20px;margin:0 0 8px}
+.bar{display:flex;justify-content:space-between;align-items:center;margin-top:8px;gap:8px}
+.small{font-size:13px;color:var(--muted)}
+#toast{position:fixed;left:12px;right:12px;bottom:calc(14px + env(safe-area-inset-bottom,0px));max-width:496px;margin:auto;padding:12px 14px;border-radius:12px;background:var(--ink);color:var(--bg);display:none;z-index:9}
+#toast.bad{background:var(--bad);color:#fff}
+#sheet{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:flex-end;z-index:8}
+#sheet>div{background:var(--surface);width:100%;max-width:520px;margin:auto;border-radius:18px 18px 0 0;padding:16px;max-height:90%;overflow:auto}
+.pl{display:block;width:100%;text-align:left;margin-bottom:8px}
+video{width:100%;border-radius:12px;background:#000;margin-bottom:10px}
+.qr{width:200px;max-width:100%;margin:8px auto;background:#fff;padding:8px;border-radius:12px}
+.qr svg{width:100%;height:auto;display:block}
+</style>
+</head>
+<body>
+<main>
+<h1>🤝 Human Bingo</h1>
+<p class="sub">Find people who’ve done the things on your card.</p>
+<div id="app"><div class="panel">Loading…</div></div>
+</main>
+<div id="toast"></div>
+<div id="sheet"><div id="sheetBody"></div></div>
+<script>
+/* Small client for the Node.js Bingo server; anonymous cookie-based sessions. */
+(function () {
+  var HK = new URLSearchParams(location.search).get('host') || '', store = null, subs = [];
+  function api(action, payload) {
+    return fetch('/api/' + action, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'x-host-key': HK },
+      body: JSON.stringify(payload || {})
+    }).then(function (r) {
+      return r.json().then(function (j) {
+        if (!r.ok) throw new Error(j.error || 'Server error');
+        return j;
+      });
+    });
+  }
+  window.bingoApi = api;
+  var es = new EventSource('/api/events');
+  es.onmessage = function (e) {
+    try { store = JSON.parse(e.data); subs.forEach(function (f) { f(); }); }
+    catch (err) { console.error('Could not read live game update', err); }
+  };
+  es.onerror = function () { console.warn('Connection interrupted; reconnecting automatically'); };
+  function collection(name) {
+    return { onSnapshot: function (cb) {
+      var update = function () {
+        if (!store) return;
+        cb({ docs: Object.keys(store).filter(function (k) {
+          return k.indexOf(name + '/') === 0;
+        }).map(function (k) {
+          return { id: k.slice(name.length + 1), data: function () { return store[k]; } };
+        }) });
+      };
+      subs.push(update);
+      if (store) update();
+    } };
+  }
+  window.bingoClient = {
+    use: async function (name) {
+      if (name === 'user') return {
+        id: async function () {
+          var r = await fetch('/api/session', { credentials: 'same-origin' });
+          if (!r.ok) throw new Error('Could not create browser session');
+          return (await r.json()).id;
+        },
+        canEdit: async function () { return HK ? (await api('host')).ok : false; }
+      };
+      return { collection: collection };
+    }
+  };
+})();
+</script>
+<script>
+(function(){
+var $=function(i){return document.getElementById(i)};
+var db=null,me=null,isHost=false,joining=false,seenMine=null,stream=null;
+var game={},players={},cards=[],claims={};
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function toast(m,bad){var t=$('toast');t.textContent=m;t.className=bad?'bad':'';t.style.display='block';clearTimeout(toast.h);toast.h=setTimeout(function(){t.style.display='none'},bad?9000:4500)}
+function err(e){toast('Something went wrong: '+(e&&e.message||e),true)}
+function handleOf(n){return n.toLowerCase().replace(/^@/,'').replace(/[^a-z0-9_]/g,'')}
+
+var PROMPTS=["ran a marathon or long race","speaks three or more languages","met a celebrity","appeared on TV or radio","has a pet that isn’t a cat or dog","lived in another country","broke a bone","can juggle","plays a musical instrument","went skydiving or bungee jumping","climbed a mountain","got lost in a foreign city","wrote a book or blog","can solve a Rubik’s cube","slept in a tent","has a twin","got stuck in an elevator","won a trophy or medal","cooked for 10+ people","fell asleep at the cinema","visited 5+ countries","performed on stage","learned to swim as an adult","planted a tree","missed a flight or train","ate something unusual","adopted a rescue animal","rode a horse","went to a music festival","has a tattoo","volunteered for charity","can do a handstand","baked bread from scratch","drove a manual car","was in a newspaper","read 20+ books in a year","did a 500 km road trip","fixed something with duct tape","sang karaoke","grew their own vegetables"];
+
+/* ---- cards ---- */
+function newItems(){var a=PROMPTS.map(function(_,i){return i});for(var i=a.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1)),t=a[i];a[i]=a[j];a[j]=t}var it=a.slice(0,24);it.splice(12,0,-1);return it}
+async function newCard(){ return bingoApi('new-card',{items:newItems()}); }
+var LINES=(function(){var L=[],i,j;for(i=0;i<5;i++){var r=[],c=[];for(j=0;j<5;j++){r.push(i*5+j);c.push(j*5+i)}L.push(r,c)}L.push([0,6,12,18,24],[4,8,12,16,20]);return L})();
+function winLine(c){for(var i=0;i<LINES.length;i++)if(LINES[i].every(function(x){return c.marks&&c.marks[x]}))return LINES[i];return null}
+function myCards(){return cards.filter(function(c){return c.owner===me})}
+function cardById(id){return cards.filter(function(c){return c.id===id})[0]}
+
+/* ---- render ---- */
+function qrSvg(text){if(typeof qrcode!=='function')return '<p class="small">QR code unavailable. Ask the other player to type your username.</p>';var q=qrcode(0,'M');q.addData(text);q.make();return q.createSvgTag({scalable:true,margin:0})}
+var lastKey='';
+function render(){
+  var key=JSON.stringify([!!db,me,isHost,players,cards,claims]);
+  if(key===lastKey)return; // no change: don't redraw, so taps aren't lost
+  lastKey=key;
+  var app=$('app');
+  if(!db){app.innerHTML='<div class="panel">Connecting to the game server… If this message stays, check your internet connection and reload.</div>';return}
+  var h='';
+  if(!players[me]){
+    h+='<div class="panel"><h2>How to play</h2><ol><li>Pick a unique username and tap <b>Join</b> to get your card.</li><li>Share this page’s link so friends can join.</li><li>Each square says what someone once did. Find a player who did it.</li><li>Tap the square, then <b>scan their ID</b> (QR) or <b>type their username</b>.</li><li>You can use each person only once per card. First to complete a row, column or diagonal wins!</li></ol></div>';
+    h+='<div class="panel"><h2>Join the game</h2><input id="nm" maxlength="20" placeholder="Choose a username" autocomplete="nickname"><button id="join" style="width:100%">Join &amp; get my card</button></div>';
+    app.innerHTML=h;$('join').onclick=join;return;
+  }
+  var mine=myCards(),count=Object.keys(players).length;
+  h+='<div class="panel"><div class="row" style="align-items:center"><div><b>@'+esc(players[me].handle)+'</b><div class="small">'+count+' player'+(count===1?'':'s')+' in the game</div></div><button id="myid" class="ghost" style="flex:none">Show my ID</button></div><p class="small" style="margin:8px 0 0">Tap a square when you meet someone who fits it, then scan their ID or type their username.</p></div>';
+  if(isHost)h+='<div class="panel"><h2>Host</h2><button id="reset" class="ghost" style="width:100%">New game (clear all marks)</button><div class="small" style="margin-top:8px">'+claimsText()+'</div></div>';
+  if(!mine.length)h+='<div class="panel">You have no cards. <button id="more" style="margin-top:8px;width:100%">Get a new card</button></div>';
+  mine.forEach(function(c){
+    var line=winLine(c)||[];
+    h+='<div class="card'+(line.length?' won':'')+'" data-id="'+c.id+'">'+(line.length?'<div class="banner">🎉 BINGO!</div>':'')+'<div class="grid">';
+    c.items.forEach(function(p,i){
+      var w=c.marks&&c.marks[i];
+      var txt=p<0?'FREE':w?'@'+esc(w==='free'?'':(players[w]?players[w].handle:'player')):'Who once '+PROMPTS[p];
+      h+='<button class="cell'+(w?' marked':'')+(line.indexOf(i)>-1?' line':'')+'" data-i="'+i+'">'+txt+'</button>';
+    });
+    h+='</div><div class="bar"><span class="small">'+(c.from&&players[c.from]?'Gift from '+esc(players[c.from].name):'Your card')+'</span><span class="row" style="flex:none">'+(line.length&&!claims[c.id]?'<button class="claim">Claim BINGO</button>':'')+(line.length&&claims[c.id]?'<span class="small">✅ Claimed</span>':'')+'<button class="ghost give"'+(mine.length<2?' disabled':'')+'>Give card</button></span></div></div>';
+  });
+  h+='<div class="panel"><h2>Share &amp; rules</h2><p class="small" style="margin-top:0">Send friends this page’s link; anyone who opens it can join.</p>'+(mine.length?'<button id="more" style="width:100%;margin-bottom:8px">Get another card (to give away)</button>':'')+'<button id="copy" class="ghost" style="width:100%;margin-bottom:10px">Copy link</button><p class="small" style="margin:0"><b>One person, one square:</b> you can’t use the same player twice on a card, or yourself. <b>Giving cards:</b> pick “Give card”, choose a player; you keep at least one. <b>No swaps:</b> if you gave Sam a card (or Sam gave you one), you can’t give to each other the other way.</p></div>';
+  app.innerHTML=h;bind();
+}
+function claimsText(){var k=Object.keys(claims);return k.length?'Bingo claimed by: '+k.map(function(id){var o=claims[id];return esc(players[o.owner]?players[o.owner].name:'a player')}).join(', '):'No bingo claims yet.'}
+function bind(){
+  if($('myid'))$('myid').onclick=showId;
+  if($('reset'))$('reset').onclick=resetGame;
+  if($('more'))$('more').onclick=function(){newCard().catch(err)};
+  if($('copy'))$('copy').onclick=function(){var u=location.origin+location.pathname;(navigator.clipboard?navigator.clipboard.writeText(u):Promise.reject()).then(function(){toast('Link copied')},function(){toast('Copy this link: '+u)})};
+  $('app').querySelectorAll('.card').forEach(function(el){
+    var id=el.getAttribute('data-id');
+    var g=el.querySelector('.give');if(g)g.onclick=function(){openGive(id)};
+    var c=el.querySelector('.claim');if(c)c.onclick=function(){bingoApi('claim',{cardId:id}).then(function(){toast('BINGO claimed! 🎉')}).catch(err)};
+  });
+}
+
+/* ---- sheet ---- */
+var sheetAt=0;function sheet(html){sheetAt=Date.now();$('sheetBody').innerHTML=html;$('sheet').style.display='flex'}
+function closeSheet(){stopCam();$('sheet').style.display='none'}
+// The tap that opens a menu can fire a late 'ghost' click on whatever button sits under the finger. Swallow clicks for 0.4 s.
+$('sheet').addEventListener('click',function(e){if(Date.now()-sheetAt<400){e.stopPropagation();e.preventDefault()}},true);
+$('sheet').onclick=function(e){if(e.target===$('sheet'))closeSheet()};
+function showId(){
+  sheet('<h2>My player ID</h2><p class="small">Let another player scan this to confirm they met you.</p><div class="qr">'+qrSvg('bingo:'+me)+'</div><p style="text-align:center;font-weight:800;font-size:20px;margin:0 0 12px">@'+esc(players[me].handle)+'</p><button class="ghost" id="x" style="width:100%">Close</button>');
+  $('x').onclick=closeSheet;
+}
+function openCell(cardId,i){
+  var c=cardById(cardId);if(!c||c.owner!==me)return;
+  var p=c.items[i];if(p<0)return;
+  var w=c.marks&&c.marks[i];
+  var h='<h2>Find someone who once…</h2><p style="font-size:18px;font-weight:700;margin-top:0">'+esc(PROMPTS[p])+'</p>';
+  if(w)h+='<p>Confirmed: <b>@'+esc(players[w]?players[w].handle:'player')+'</b></p><button class="ghost pl" id="undo">Remove this match</button>';
+  else h+='<button class="pl" id="scan">📷 Scan their ID</button><button class="ghost pl" id="typ">⌨️ Type their username</button>';
+  h+='<button class="ghost pl" id="x">Close</button>';
+  sheet(h);$('x').onclick=closeSheet;
+  if($('undo'))$('undo').onclick=function(){closeSheet();setMark(cardId,i,null)};
+  if($('scan'))$('scan').onclick=function(){scan(cardId,i)};
+  if($('typ'))$('typ').onclick=function(){
+    sheet('<h2>Their username</h2><p class="small">'+esc(PROMPTS[p])+'</p><input id="un" placeholder="@username" autocapitalize="none" autocorrect="off"><button class="pl" id="ok">Confirm</button><button class="ghost pl" id="x">Cancel</button>');
+    $('x').onclick=closeSheet;
+    $('ok').onclick=function(){
+      var hd=handleOf($('un').value),id=Object.keys(players).filter(function(k){return players[k].handle===hd})[0];
+      if(!hd||!id){toast('No player with username “'+$('un').value+'”. Check the spelling with them.',true);return}
+      closeSheet();setMark(cardId,i,id);
+    };
+  };
+}
+function stopCam(){if(stream){stream.getTracks().forEach(function(t){t.stop()});stream=null}}
+async function scan(cardId,i){
+  sheet('<h2>Scan their ID</h2><video id="v" playsinline muted></video><p class="small" id="st">Point the camera at their QR code (Show my ID on their phone).</p><button class="ghost pl" id="x">Cancel</button>');
+  $('x').onclick=closeSheet;
+  try{
+    if(typeof jsQR!=='function'||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('QR scanning unavailable');
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    if($('sheet').style.display!=='flex'||!$('v')){stopCam();return;}
+    var v=$('v');v.srcObject=stream;await v.play();
+    var cv=document.createElement('canvas'),cx=cv.getContext('2d',{willReadFrequently:true});
+    (function tick(){
+      if(!stream)return;
+      if(v.videoWidth){cv.width=v.videoWidth;cv.height=v.videoHeight;cx.drawImage(v,0,0);
+        var r=jsQR(cx.getImageData(0,0,cv.width,cv.height).data,cv.width,cv.height);
+        if(r&&r.data.indexOf('bingo:')===0){var id=r.data.slice(6);closeSheet();
+          if(!players[id]){toast('That QR code isn’t a player in this game.',true);return}
+          setMark(cardId,i,id);return}}
+      requestAnimationFrame(tick);
+    })();
+  }catch(e){var s=$('st');if(s)s.innerHTML='Camera isn’t available here. Close this and use <b>Type their username</b> instead.'}
+}
+
+/* ---- actions ---- */
+async function join(){
+  var name=$('nm').value.trim(),hd=handleOf(name);
+  if(!hd){toast('Please choose a username (letters or numbers).',true);return}
+  if(Object.keys(players).some(function(k){return players[k].handle===hd})){toast('“'+name+'” is taken. Please pick another username.',true);return}
+  if(joining)return;joining=true;
+  try{await bingoApi('join',{name:name,items:newItems()})}catch(e){err(e)}
+  joining=false;
+}
+function setMark(cardId,i,who){
+  var c=cardById(cardId);if(!c||c.owner!==me)return;
+  var m=Object.assign({},c.marks||{});
+  if(who){
+    if(who===me){toast('You can’t confirm your own square. Find someone else!',true);return}
+    var used=Object.keys(m).filter(function(k){return m[k]===who})[0];
+    if(used!==undefined){toast('Already used: @'+players[who].handle+' is on another square of this card. Each person counts once per card — find someone new.',true);return}
+    m[i]=who;
+  }else delete m[i];
+  bingoApi('mark',{cardId:cardId,index:i,playerId:who||null}).then(function(){if(who)toast('Matched with @'+players[who].handle+' ✔')}).catch(err);
+}
+async function resetGame(){
+  if(!confirm('Start a new game? This clears all marks and claims.'))return;
+  try{await bingoApi('reset');toast('Game reset ✔')}catch(e){err(e)}
+}
+
+/* ---- giving a card (one-way only) ---- */
+function openGive(cardId){
+  var others=Object.keys(players).filter(function(id){return id!==me});
+  var h=others.length?'<h2>Give this card to…</h2>'+others.map(function(id){return'<button class="ghost pl" data-p="'+id+'">'+esc(players[id].name)+'</button>'}).join(''):'<h2>Give card</h2><p>No other players yet. Share the link first!</p>';
+  sheet(h+'<button class="ghost pl" id="x">Cancel</button>');$('x').onclick=closeSheet;
+  $('sheetBody').querySelectorAll('[data-p]').forEach(function(p){p.onclick=function(){closeSheet();give(cardId,p.getAttribute('data-p'))}});
+}
+async function give(cardId,to){
+  var tn=players[to]?players[to].name:'that player',c=cardById(cardId);
+  if(!c||c.owner!==me){toast('That card is no longer yours.',true);return}
+  if(myCards().length<2){toast('You must keep at least one card.',true);return}
+  try{await bingoApi('gift',{cardId:cardId,to:to});toast('Card given to '+tn+' ✔')}catch(e){err(e)}
+}
+function notifyReceived(){
+  var ids=myCards().map(function(c){return c.id});
+  if(seenMine)ids.forEach(function(id){if(seenMine.indexOf(id)<0){var c=cardById(id);if(c&&c.from)toast('🎁 '+(players[c.from]?players[c.from].name:'A player')+' gave you a card!')}});
+  seenMine=ids;
+}
+async function start(){
+  try{
+    var user=await bingoClient.use('user');db=await bingoClient.use('db');
+    if(!db||!user){render();return}
+    me=await user.id();isHost=await user.canEdit();
+    db.collection('players').onSnapshot(function(s){players={};s.docs.forEach(function(d){if(d.data().handle)players[d.id]=d.data()});render()},err);
+    db.collection('claims').onSnapshot(function(s){claims={};s.docs.forEach(function(d){claims[d.id]=d.data()});render()},err);
+    db.collection('cards').onSnapshot(function(s){cards=s.docs.map(function(d){var x=d.data();x.id=d.id;return x}).filter(function(x){return x.items});notifyReceived();render()},err);
+  }catch(e){render()}
+}
+$('app').addEventListener('pointerup',function(e){
+  var b=e.target.closest&&e.target.closest('.cell');if(!b)return;
+  var c=b.closest('.card');if(c)openCell(c.getAttribute('data-id'),+b.getAttribute('data-i'));
+});
+render();start();
+})();
+</script>
+</body>
+</html>

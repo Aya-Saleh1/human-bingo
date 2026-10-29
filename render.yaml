@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: human-bingo
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: HOST_KEY
+        sync: false
