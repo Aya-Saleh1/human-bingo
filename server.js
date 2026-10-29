@@ -10,7 +10,9 @@ const HOST_KEY = process.env.HOST_KEY || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || HOST_KEY || crypto.randomBytes(32).toString('hex');
 const FILE = path.join(__dirname, 'data.json');
 const PAGE = path.join(__dirname, 'public', 'index.html');
-const PROMPT_COUNT = 40; // Keep in sync with PROMPTS in public/index.html.
+const GRID_SIZE = 6;
+const CELL_COUNT = GRID_SIZE * GRID_SIZE;
+const PROMPT_COUNT = 124; // Must match the PROMPTS list in public/index.html.
 const COOKIE_NAME = 'bingo_sid';
 const clients = new Set();
 let saveTimer;
@@ -69,25 +71,74 @@ function isHost(req) {
     crypto.timingSafeEqual(Buffer.from(String(req.headers['x-host-key'])), Buffer.from(HOST_KEY)));
 }
 function cardItemsValid(items) {
-  return Array.isArray(items) && items.length === 25 && items[12] === -1 &&
-    items.every((x, i) => i === 12 || (Number.isInteger(x) && x >= 0 && x < PROMPT_COUNT)) &&
-    new Set(items.filter((_, i) => i !== 12)).size === 24;
+  return Array.isArray(items) && items.length === CELL_COUNT &&
+    items.every(x => Number.isInteger(x) && x >= 0 && x < PROMPT_COUNT) &&
+    new Set(items).size === CELL_COUNT;
 }
 function newCard(owner, items) {
   const id = 'c' + crypto.randomBytes(12).toString('hex');
-  store['cards/' + id] = { owner, items, marks: { '12': 'free' }, from: null, at: Date.now() };
+  store['cards/' + id] = { owner, items, marks: {}, at: Date.now() };
   return id;
 }
 function cardsOwnedBy(id) {
   return Object.entries(store).filter(([key, card]) => key.startsWith('cards/') && card.owner === id);
 }
 const lines = [];
-for (let i = 0; i < 5; i++) {
-  lines.push(Array.from({ length: 5 }, (_, j) => i * 5 + j));
-  lines.push(Array.from({ length: 5 }, (_, j) => j * 5 + i));
+for (let i = 0; i < GRID_SIZE; i++) {
+  lines.push(Array.from({ length: GRID_SIZE }, (_, j) => i * GRID_SIZE + j));
+  lines.push(Array.from({ length: GRID_SIZE }, (_, j) => j * GRID_SIZE + i));
 }
-lines.push([0, 6, 12, 18, 24], [4, 8, 12, 16, 20]);
+lines.push(
+  Array.from({ length: GRID_SIZE }, (_, i) => i * GRID_SIZE + i),
+  Array.from({ length: GRID_SIZE }, (_, i) => i * GRID_SIZE + GRID_SIZE - 1 - i)
+);
 function hasBingo(card) { return lines.some(line => line.every(i => card.marks && card.marks[i])); }
+function shuffledItems() {
+  const choices = Array.from({ length: PROMPT_COUNT }, (_, i) => i);
+  for (let i = choices.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [choices[i], choices[j]] = [choices[j], choices[i]];
+  }
+  return choices.slice(0, CELL_COUNT);
+}
+// On upgrade, replace old 5×5 cards with 6×6 cards without deleting player identities.
+// Card gifts and extra cards no longer exist: retain the oldest card per player.
+function migrateSavedGame() {
+  let changed = false;
+  const owners = new Set();
+  const saved = Object.entries(store).filter(([k]) => k.startsWith('cards/'))
+    .sort((a, b) => (a[1]?.at || 0) - (b[1]?.at || 0));
+  for (const [key, card] of saved) {
+    const id = key.slice('cards/'.length);
+    if (!card || !store['players/' + card.owner] || owners.has(card.owner)) {
+      delete store[key];
+      delete store['claims/' + id];
+      changed = true;
+      continue;
+    }
+    owners.add(card.owner);
+    if (!cardItemsValid(card.items)) {
+      card.items = shuffledItems();
+      card.marks = {};
+      delete store['claims/' + id];
+      changed = true;
+    }
+    if ('from' in card) { delete card.from; changed = true; }
+  }
+  for (const key of Object.keys(store)) {
+    if (key.startsWith('pairs/')) { delete store[key]; changed = true; }
+  }
+  for (const key of Object.keys(store)) {
+    if (!key.startsWith('players/')) continue;
+    const owner = key.slice('players/'.length);
+    if (!owners.has(owner)) { newCard(owner, shuffledItems()); changed = true; }
+  }
+  if (changed) {
+    persist();
+    console.log('Saved game updated to 6x6: existing player names kept, old boards/marks replaced as needed.');
+  }
+}
+migrateSavedGame();
 function doAction(req, res, action, body, userId) {
   const ownPlayer = store['players/' + userId];
   const cardId = body.cardId;
@@ -109,23 +160,18 @@ function doAction(req, res, action, body, userId) {
   if (action === 'reset') {
     if (!isHost(req)) return fail(res, 403, 'Only the host can reset the game');
     for (const [k, v] of Object.entries(store)) {
-      if (k.startsWith('cards/')) v.marks = { '12': 'free' };
+      if (k.startsWith('cards/')) v.marks = {};
       if (k.startsWith('claims/')) delete store[k];
     }
     broadcast();
     return reply(res, 200, { ok: true });
   }
+  if (action !== 'mark' && action !== 'claim') return fail(res, 404, 'Unknown action');
   if (!ownPlayer) return fail(res, 403, 'Join the game first');
-  if (action === 'new-card') {
-    if (!cardItemsValid(body.items)) return fail(res, 400, 'Invalid card');
-    const id = newCard(userId, body.items);
-    broadcast();
-    return reply(res, 200, { ok: true, id });
-  }
   if (!card || card.owner !== userId) return fail(res, 403, 'Card does not belong to you');
   if (action === 'mark') {
     const i = body.index, who = body.playerId;
-    if (!Number.isInteger(i) || i < 0 || i > 24 || i === 12) return fail(res, 400, 'Invalid square');
+    if (!Number.isInteger(i) || i < 0 || i >= CELL_COUNT) return fail(res, 400, 'Invalid square');
     if (who !== null && (typeof who !== 'string' || who === userId || !store['players/' + who])) return fail(res, 400, 'Choose another registered player');
     const marks = { ...card.marks };
     if (who !== null) {
@@ -140,21 +186,6 @@ function doAction(req, res, action, body, userId) {
   if (action === 'claim') {
     if (!hasBingo(card)) return fail(res, 409, 'Complete a row, column or diagonal first');
     if (!store['claims/' + cardId]) store['claims/' + cardId] = { owner: userId, at: Date.now() };
-    broadcast();
-    return reply(res, 200, { ok: true });
-  }
-  if (action === 'gift') {
-    const to = body.to;
-    if (typeof to !== 'string' || to === userId || !store['players/' + to]) return fail(res, 400, 'Choose another registered player');
-    if (cardsOwnedBy(userId).length < 2) return fail(res, 409, 'You must keep at least one card');
-    const pairKey = 'pairs/' + [userId, to].sort().join('_');
-    const pair = store[pairKey];
-    if (pair && pair.from !== userId) return fail(res, 409, 'Reverse card gifts are not allowed');
-    store[pairKey] = { from: userId, to, at: Date.now() };
-    card.owner = to;
-    card.from = userId;
-    card.marks = { '12': 'free' };
-    delete store['claims/' + cardId];
     broadcast();
     return reply(res, 200, { ok: true });
   }
